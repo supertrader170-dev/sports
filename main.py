@@ -1,13 +1,14 @@
 """
 🌟 World Cup 2026 Charity Prediction Bot
-نسخه ۱.۰ - آماده برای اجرا
+نسخه ۲.۰ - مقاوم در برابر کرش
 """
 
 import os
+import sys
 import asyncio
 import logging
 import sqlite3
-import pandas as pd
+import traceback
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
@@ -15,57 +16,86 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton
+    FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from dotenv import load_dotenv
 
 # ============================================
-# ⚙️ تنظیمات اولیه
+# ⚙️ تنظیمات لاگینگ (برای دیدن خطاها)
 # ============================================
-load_dotenv()
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-ADMIN_ID = int(os.getenv('ADMIN_ID'))
-SOLANA_WALLET = os.getenv('SOLANA_PLATFORM_WALLET')
-REQUIRED_SOL = float(os.getenv('DONATION_AMOUNT_SOL', '0.035'))
-
-# راه‌اندازی ربات
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ============================================
-# 🗄️ دیتابیس SQLite (ساده و بدون نیاز به نصب)
+# ⚙️ بارگذاری متغیرهای محیطی
 # ============================================
+try:
+    load_dotenv()
+    BOT_TOKEN = os.getenv('BOT_TOKEN')
+    ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+    SOLANA_WALLET = os.getenv('SOLANA_PLATFORM_WALLET', '')
+    REQUIRED_SOL = float(os.getenv('DONATION_AMOUNT_SOL', '0.035'))
+    
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN در فایل .env یافت نشد!")
+        sys.exit(1)
+    
+    logger.info("✅ متغیرهای محیطی با موفقیت بارگذاری شدند")
+except Exception as e:
+    logger.error(f"❌ خطا در بارگذاری متغیرهای محیطی: {e}")
+    sys.exit(1)
+
+# ============================================
+# 🗄️ دیتابیس SQLite با مدیریت خطا
+# ============================================
+DB_FILE = 'bot_database.db'
+
 def init_db():
-    conn = sqlite3.connect('bot_database.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-                    tg_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    lang TEXT,
-                    country TEXT,
-                    email TEXT,
-                    wallet TEXT,
-                    memo_code TEXT,
-                    status TEXT DEFAULT 'pending',
-                    prediction_champion TEXT,
-                    prediction_runner TEXT,
-                    prediction_third TEXT,
-                    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )''')
-    c.execute('''CREATE TABLE IF NOT EXISTS tournaments (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT,
-                    sport TEXT,
-                    teams TEXT,
-                    status TEXT DEFAULT 'active'
-                )''')
-    conn.commit()
-    conn.close()
-
-init_db()
+    """ساخت دیتابیس با مدیریت خطا"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # جدول کاربران
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+                        tg_id INTEGER PRIMARY KEY,
+                        username TEXT,
+                        lang TEXT,
+                        country TEXT,
+                        email TEXT,
+                        wallet TEXT,
+                        memo_code TEXT,
+                        status TEXT DEFAULT 'pending',
+                        prediction_champion TEXT,
+                        prediction_runner TEXT,
+                        prediction_third TEXT,
+                        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )''')
+        
+        # جدول تورنمنت‌ها
+        c.execute('''CREATE TABLE IF NOT EXISTS tournaments (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT,
+                        sport TEXT,
+                        teams TEXT,
+                        status TEXT DEFAULT 'active'
+                    )''')
+        
+        conn.commit()
+        conn.close()
+        logger.info("✅ دیتابیس با موفقیت ساخته شد")
+        return True
+    except Exception as e:
+        logger.error(f"❌ خطا در ساخت دیتابیس: {e}")
+        logger.error(traceback.format_exc())
+        return False
 
 # ============================================
 # 🌐 زبان‌ها و کشورها
@@ -85,24 +115,22 @@ COUNTRIES = [
 ]
 
 # ============================================
-# 📝 متن‌های چندزبانه (خلاصه برای fa و en)
+# 📝 متن‌های چندزبانه
 # ============================================
 TEXTS = {
     "fa": {
         "welcome": """
 🌟 به بزرگترین پلتفرم پیش‌بینی ورزشی با هدف خیریه خوش آمدید! 🌟
 
-🔹 این پلتفرم هیچ‌گونه ماهیت قمار (Gambling) ندارد و صرفاً یک "مسابقه پیش‌بینی ورزشی با ورودی خیریه (Donation)" است که جوایز آن به قید قرعه بین اهداکنندگان توزیع می‌شود.
+🔹 این پلتفرم هیچ‌گونه ماهیت قمار (Gambling) ندارد و صرفاً یک "مسابقه پیش‌بینی ورزشی با ورودی خیریه (Donation)" است.
 🔹 تمام ۷۵٪ از دونیت‌ها مستقیماً به یونیسف (UNICEF) و اتحادیه بین‌المللی کنترل سرطان (UICC) اهدا می‌شود.
-🔹 شفافیت مطلق با تکنولوژی Provably Fair (استفاده از هش بلاک‌های سولانا به عنوان Seed تصادفی قرعه‌کشی).
+🔹 شفافیت مطلق با تکنولوژی Provably Fair.
 
 🏆 قوانین جوایز (۲۰٪ کل دونیت‌ها):
 1️⃣ پیش‌بینی کامل (۳ تیم): ۲۰۲۶ برنده (هر نفر ۰.۰۰۳٪)
 2️⃣ پیش‌بینی دو تیم: ۲۰۲۶ برنده (هر نفر ۰.۰۰۲٪)
 3️⃣ پیش‌بینی یک تیم: ۲۰۲۶ برنده (هر نفر ۰.۰۰۱٪)
 4️⃣ قرعه‌کشی شانس: ۴۶۵۹۸ برنده (هر نفر ۰.۰۰۰۱۶۸٪)
-
-⚠️ جوایز به نسبت جمعیت کاربران هر کشور تقسیم می‌شود تا از سراسر جهان برنده داشته باشیم!
 
 💵 هزینه دونیت: معادل ۵ دلار (حدود ۰.۰۳۵ سولانا)
 """,
@@ -147,7 +175,7 @@ TEXTS = {
 }
 
 # ============================================
-# 🔄 Stateها (مراحل ثبت‌نام)
+# 🔄 Stateها
 # ============================================
 class RegStates(StatesGroup):
     lang = State()
@@ -161,354 +189,259 @@ class RegStates(StatesGroup):
     support = State()
 
 # ============================================
-# 🚀 هندلرهای ربات
+# 🚀 هندلرهای ربات با Error Handling
 # ============================================
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, state: FSMContext):
-    # ساخت کیبورد زبان‌ها
-    buttons = []
-    row = []
-    for code, name in LANGUAGES.items():
-        row.append(InlineKeyboardButton(text=name, callback_data=f"lang_{code}"))
-        if len(row) == 3:
+    try:
+        buttons = []
+        row = []
+        for code, name in LANGUAGES.items():
+            row.append(InlineKeyboardButton(text=name, callback_data=f"lang_{code}"))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
             buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer(TEXTS["en"]["select_lang"], reply_markup=kb)
-    await state.set_state(RegStates.lang)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.answer(TEXTS["en"]["select_lang"], reply_markup=kb)
+        await state.set_state(RegStates.lang)
+    except Exception as e:
+        logger.error(f"خطا در cmd_start: {e}")
+        logger.error(traceback.format_exc())
+        await message.answer("❌ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
 @dp.callback_query(F.data.startswith('lang_'))
 async def process_lang(callback: types.CallbackQuery, state: FSMContext):
-    lang = callback.data.split('_')[1]
-    await state.update_data(lang=lang, tg_id=callback.from_user.id, username=callback.from_user.username or "")
-    
-    # نمایش متن خوش‌آمدگویی
-    welcome_text = TEXTS.get(lang, TEXTS["en"])["welcome"]
-    await callback.message.edit_text(welcome_text)
-    
-    # کیبورد کشورها
-    buttons = []
-    row = []
-    for country in COUNTRIES:
-        row.append(InlineKeyboardButton(text=country, callback_data=f"country_{country}"))
-        if len(row) == 2:
+    try:
+        lang = callback.data.split('_')[1]
+        await state.update_data(lang=lang, tg_id=callback.from_user.id, username=callback.from_user.username or "")
+        
+        welcome_text = TEXTS.get(lang, TEXTS["en"])["welcome"]
+        await callback.message.edit_text(welcome_text)
+        
+        buttons = []
+        row = []
+        for country in COUNTRIES:
+            row.append(InlineKeyboardButton(text=country, callback_data=f"country_{country}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
             buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.answer(TEXTS[lang]["select_country"], reply_markup=kb)
-    await state.set_state(RegStates.country)
-    await callback.answer()
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.answer(TEXTS[lang]["select_country"], reply_markup=kb)
+        await state.set_state(RegStates.country)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"خطا در process_lang: {e}")
+        await callback.answer("❌ خطایی رخ داد", show_alert=True)
 
 @dp.callback_query(F.data.startswith('country_'))
 async def process_country(callback: types.CallbackQuery, state: FSMContext):
-    country = callback.data.split('_')[1]
-    await state.update_data(country=country)
-    data = await state.get_data()
-    lang = data.get('lang', 'en')
-    
-    await callback.message.edit_text(TEXTS[lang]["enter_email"])
-    await state.set_state(RegStates.email)
-    await callback.answer()
+    try:
+        country = callback.data.split('_')[1]
+        await state.update_data(country=country)
+        data = await state.get_data()
+        lang = data.get('lang', 'en')
+        
+        await callback.message.edit_text(TEXTS[lang]["enter_email"])
+        await state.set_state(RegStates.email)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"خطا در process_country: {e}")
+        await callback.answer("❌ خطایی رخ داد", show_alert=True)
 
 @dp.message(RegStates.email)
 async def process_email(message: types.Message, state: FSMContext):
-    await state.update_data(email=message.text)
-    data = await state.get_data()
-    lang = data.get('lang', 'en')
-    await message.answer(TEXTS[lang]["enter_wallet"])
-    await state.set_state(RegStates.wallet)
+    try:
+        await state.update_data(email=message.text)
+        data = await state.get_data()
+        lang = data.get('lang', 'en')
+        await message.answer(TEXTS[lang]["enter_wallet"])
+        await state.set_state(RegStates.wallet)
+    except Exception as e:
+        logger.error(f"خطا در process_email: {e}")
+        await message.answer("❌ خطایی رخ داد")
 
 @dp.message(RegStates.wallet)
 async def process_wallet(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    lang = data.get('lang', 'en')
-    
-    # تولید کد یکتا (Memo)
-    memo_code = f"P{data['tg_id']}"
-    await state.update_data(wallet=message.text, memo_code=memo_code)
-    
-    payment_text = TEXTS[lang]["payment_info"].format(
-        amount=REQUIRED_SOL,
-        wallet=SOLANA_WALLET,
-        memo=memo_code
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ پرداخت انجام شد / I have paid", callback_data="check_payment")]
-    ])
-    await message.answer(payment_text, parse_mode="Markdown", reply_markup=kb)
-    await state.set_state(RegStates.payment)
+    try:
+        data = await state.get_data()
+        lang = data.get('lang', 'en')
+        
+        memo_code = f"P{data['tg_id']}"
+        await state.update_data(wallet=message.text, memo_code=memo_code)
+        
+        payment_text = TEXTS[lang]["payment_info"].format(
+            amount=REQUIRED_SOL,
+            wallet=SOLANA_WALLET,
+            memo=memo_code
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ پرداخت انجام شد / I have paid", callback_data="check_payment")]
+        ])
+        await message.answer(payment_text, parse_mode="Markdown", reply_markup=kb)
+        await state.set_state(RegStates.payment)
+    except Exception as e:
+        logger.error(f"خطا در process_wallet: {e}")
+        await message.answer("❌ خطایی رخ داد")
 
 @dp.callback_query(F.data == 'check_payment')
 async def check_payment(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    lang = data.get('lang', 'en')
-    
-    # ⚠️ در نسخه واقعی، اینجا تابع verify_solana_transaction فراخوانی می‌شود
-    # برای شروع، تایید را به صورت دستی توسط ادمین یا خودکار انجام می‌دهیم
-    # فعلاً فرض می‌کنیم تایید شده است (در مرحله ۸ تابع واقعی را اضافه می‌کنیم)
-    
-    # ذخیره در دیتابیس
-    conn = sqlite3.connect('bot_database.db')
-    c = conn.cursor()
-    c.execute('''INSERT OR REPLACE INTO users 
-                 (tg_id, username, lang, country, email, wallet, memo_code, status)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-              (data['tg_id'], data['username'], data['lang'], data['country'],
-               data['email'], data['wallet'], data['memo_code'], 'paid'))
-    conn.commit()
-    conn.close()
-    
-    await callback.message.edit_text(TEXTS[lang]["payment_success"])
-    
-    # شروع پیش‌بینی
-    await show_teams_selection(callback.message, state, "champion")
-    await callback.answer()
+    try:
+        data = await state.get_data()
+        lang = data.get('lang', 'en')
+        
+        # ذخیره در دیتابیس
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute('''INSERT OR REPLACE INTO users 
+                     (tg_id, username, lang, country, email, wallet, memo_code, status)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                  (data['tg_id'], data['username'], data['lang'], data['country'],
+                   data['email'], data['wallet'], data['memo_code'], 'paid'))
+        conn.commit()
+        conn.close()
+        
+        await callback.message.edit_text(TEXTS[lang]["payment_success"])
+        logger.info(f"✅ کاربر {data['tg_id']} با موفقیت ثبت‌نام کرد")
+        
+        # شروع پیش‌بینی
+        await show_teams_selection(callback.message, state, "champion")
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"خطا در check_payment: {e}")
+        logger.error(traceback.format_exc())
+        await callback.answer("❌ خطایی رخ داد", show_alert=True)
 
 async def show_teams_selection(message, state: FSMContext, step: str):
-    data = await state.get_data()
-    lang = data.get('lang', 'en')
-    
-    # لیست تیم‌های حاضر در جام جهانی ۲۰۲۶ (۴۸ تیم)
-    teams = [
-        "USA", "Canada", "Mexico", "Argentina", "Brazil", "France",
-        "Germany", "Spain", "England", "Portugal", "Netherlands",
-        "Belgium", "Italy", "Croatia", "Morocco", "Japan", "South Korea",
-        "Saudi Arabia", "Iran", "Australia", "Senegal", "Uruguay",
-        "Colombia", "Ecuador", "Denmark", "Switzerland", "Poland",
-        "Serbia", "Wales", "Ghana", "Cameroon", "Tunisia", "Qatar",
-        "Egypt", "Nigeria", "Algeria", "Scotland", "Ukraine", "Austria",
-        "Turkey", "Panama", "Jamaica", "Paraguay", "Bolivia", "Peru",
-        "Honduras", "El Salvador", "New Zealand"
-    ]
-    
-    buttons = []
-    row = []
-    for team in teams:
-        row.append(InlineKeyboardButton(text=team, callback_data=f"team_{step}_{team}"))
-        if len(row) == 3:
+    try:
+        data = await state.get_data()
+        lang = data.get('lang', 'en')
+        
+        teams = [
+            "USA", "Canada", "Mexico", "Argentina", "Brazil", "France",
+            "Germany", "Spain", "England", "Portugal", "Netherlands",
+            "Belgium", "Italy", "Croatia", "Morocco", "Japan", "South Korea",
+            "Saudi Arabia", "Iran", "Australia"
+        ]
+        
+        buttons = []
+        row = []
+        for team in teams:
+            row.append(InlineKeyboardButton(text=team, callback_data=f"team_{step}_{team}"))
+            if len(row) == 3:
+                buttons.append(row)
+                row = []
+        if row:
             buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    if step == "champion":
-        text = TEXTS[lang]["predict_champion"]
-        await state.set_state(RegStates.predict_champion)
-    elif step == "runner":
-        text = TEXTS[lang]["predict_runner"]
-        await state.set_state(RegStates.predict_runner)
-    elif step == "third":
-        text = TEXTS[lang]["predict_third"]
-        await state.set_state(RegStates.predict_third)
-    
-    await message.answer(text, reply_markup=kb)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        if step == "champion":
+            text = TEXTS[lang]["predict_champion"]
+            await state.set_state(RegStates.predict_champion)
+        elif step == "runner":
+            text = TEXTS[lang]["predict_runner"]
+            await state.set_state(RegStates.predict_runner)
+        elif step == "third":
+            text = TEXTS[lang]["predict_third"]
+            await state.set_state(RegStates.predict_third)
+        
+        await message.answer(text, reply_markup=kb)
+    except Exception as e:
+        logger.error(f"خطا در show_teams_selection: {e}")
 
 @dp.callback_query(F.data.startswith('team_'))
 async def process_team(callback: types.CallbackQuery, state: FSMContext):
-    parts = callback.data.split('_')
-    step = parts[1]
-    team = parts[2]
-    
-    data = await state.get_data()
-    tg_id = data['tg_id']
-    
-    # ذخیره در دیتابیس
-    conn = sqlite3.connect('bot_database.db')
-    c = conn.cursor()
-    if step == "champion":
-        c.execute("UPDATE users SET prediction_champion=? WHERE tg_id=?", (team, tg_id))
-        conn.commit()
-        conn.close()
-        await show_teams_selection(callback.message, state, "runner")
-    elif step == "runner":
-        c.execute("UPDATE users SET prediction_runner=? WHERE tg_id=?", (team, tg_id))
-        conn.commit()
-        conn.close()
-        await show_teams_selection(callback.message, state, "third")
-    elif step == "third":
-        c.execute("UPDATE users SET prediction_third=? WHERE tg_id=?", (team, tg_id))
-        conn.commit()
-        conn.close()
-        lang = data.get('lang', 'en')
-        await callback.message.edit_text(TEXTS[lang]["prediction_saved"])
-    
-    await callback.answer()
-
-# ============================================
-# 👨‍💼 پنل ادمین
-# ============================================
-@dp.message(Command('admin'))
-async def admin_panel(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ دسترسی غیرمجاز.")
-        return
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 آمار کاربران", callback_data="admin_stats")],
-        [InlineKeyboardButton(text="📥 خروجی اکسل", callback_data="admin_export")],
-        [InlineKeyboardButton(text="🎯 قرعه‌کشی", callback_data="admin_lottery")],
-        [InlineKeyboardButton(text="📢 ارسال پیام همگانی", callback_data="admin_broadcast")],
-        [InlineKeyboardButton(text="✅ تایید دستی پرداخت", callback_data="admin_manual_verify")]
-    ])
-    await message.answer("👨‍💼 پنل مدیریت:", reply_markup=kb)
-
-@dp.callback_query(F.data == 'admin_stats')
-async def admin_stats(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
-    
-    conn = sqlite3.connect('bot_database.db')
-    df = pd.read_sql_query("SELECT * FROM users WHERE status='paid'", conn)
-    conn.close()
-    
-    total = len(df)
-    countries = df['country'].value_counts().head(10) if total > 0 else "هیچ کاربری نیست"
-    
-    text = f"📊 آمار ربات:\n\nکل کاربران تایید شده: {total}\n\n🌍 توزیع کشورها:\n{countries.to_string()}"
-    await callback.message.edit_text(text)
-    await callback.answer()
-
-@dp.callback_query(F.data == 'admin_export')
-async def admin_export(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
-    
-    conn = sqlite3.connect('bot_database.db')
-    df = pd.read_sql_query("SELECT * FROM users WHERE status='paid'", conn)
-    conn.close()
-    
-    if df.empty:
-        await callback.message.answer("دیتابیسی وجود ندارد.")
-        return
-    
-    filename = f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    df.to_excel(filename, index=False)
-    
-    await callback.message.answer_document(
-        FSInputFile(filename),
-        caption=f"📥 لیست {len(df)} کاربر تایید شده"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == 'admin_lottery')
-async def admin_lottery(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID: return
-    
-    await callback.message.edit_text("⏳ در حال اجرای الگوریتم Provably Fair...")
-    
-    conn = sqlite3.connect('bot_database.db')
-    df = pd.read_sql_query("SELECT * FROM users WHERE status='paid'", conn)
-    conn.close()
-    
-    if df.empty:
-        await callback.message.answer("کاربری وجود ندارد.")
-        return
-    
-    # شبیه‌سازی امتیازات (در حالت واقعی از دیتابیس پیش‌بینی‌ها خوانده می‌شود)
-    # برای تست، به صورت تصادفی به کاربران امتیاز می‌دهیم
-    import random
-    df['correct_predictions'] = [random.randint(0, 3) for _ in range(len(df))]
-    
-    # محاسبه سهمیه هر کشور
-    country_counts = df['country'].value_counts()
-    total_users = len(df)
-    
-    # استفاده از هش بلاک سولانا به عنوان Seed (شبیه‌سازی)
-    seed = int(hashlib.sha256(str(datetime.now()).encode()).hexdigest(), 16) % (10**8)
-    
-    # بند ۱: ۳ پیش‌بینی درست
-    tier1_df = df[df['correct_predictions'] == 3]
-    winners_tier1 = []
-    for country, count in country_counts.items():
-        quota = round((count / total_users) * 2026)
-        country_users = tier1_df[tier1_df['country'] == country]
-        if len(country_users) > 0 and quota > 0:
-            sampled = country_users.sample(n=min(quota, len(country_users)), random_state=seed)
-            winners_tier1.append(sampled)
-    
-    if winners_tier1:
-        final_winners = pd.concat(winners_tier1)
-        filename = f"winners_tier1_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        final_winners.to_excel(filename, index=False)
+    try:
+        parts = callback.data.split('_')
+        step = parts[1]
+        team = parts[2]
         
-        await callback.message.answer_document(
-            FSInputFile(filename),
-            caption=f"🏆 لیست برندگان بند ۱ (۳ پیش‌بینی درست) - {len(final_winners)} نفر"
-        )
-    else:
-        await callback.message.answer("هیچ کاربری ۳ پیش‌بینی درست نداشته است.")
-    
-    await callback.answer()
-
-@dp.callback_query(F.data == 'admin_broadcast')
-async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != ADMIN_ID: return
-    await callback.message.answer("📢 پیام یا فایل خود را برای ارسال همگانی بفرستید:")
-    await state.set_state("waiting_broadcast")
-    await callback.answer()
-
-@dp.message(F.state == "waiting_broadcast")
-async def process_broadcast(message: types.Message, state: FSMContext):
-    if message.from_user.id != ADMIN_ID: return
-    
-    conn = sqlite3.connect('bot_database.db')
-    df = pd.read_sql_query("SELECT tg_id FROM users WHERE status='paid'", conn)
-    conn.close()
-    
-    sent = 0
-    failed = 0
-    for tg_id in df['tg_id']:
-        try:
-            if message.text:
-                await bot.send_message(tg_id, message.text)
-            elif message.photo:
-                await bot.send_photo(tg_id, message.photo[-1].file_id, caption=message.caption)
-            elif message.video:
-                await bot.send_video(tg_id, message.video.file_id, caption=message.caption)
-            elif message.voice:
-                await bot.send_voice(tg_id, message.voice.file_id)
-            sent += 1
-            await asyncio.sleep(0.05)  # جلوگیری از مسدود شدن
-        except:
-            failed += 1
-    
-    await message.answer(f"✅ ارسال شد:\nموفق: {sent}\nناموفق: {failed}")
-    await state.clear()
+        data = await state.get_data()
+        tg_id = data['tg_id']
+        
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        if step == "champion":
+            c.execute("UPDATE users SET prediction_champion=? WHERE tg_id=?", (team, tg_id))
+            conn.commit()
+            conn.close()
+            await show_teams_selection(callback.message, state, "runner")
+        elif step == "runner":
+            c.execute("UPDATE users SET prediction_runner=? WHERE tg_id=?", (team, tg_id))
+            conn.commit()
+            conn.close()
+            await show_teams_selection(callback.message, state, "third")
+        elif step == "third":
+            c.execute("UPDATE users SET prediction_third=? WHERE tg_id=?", (team, tg_id))
+            conn.commit()
+            conn.close()
+            lang = data.get('lang', 'en')
+            await callback.message.edit_text(TEXTS[lang]["prediction_saved"])
+            logger.info(f"✅ کاربر {tg_id} پیش‌بینی خود را ثبت کرد")
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"خطا در process_team: {e}")
+        await callback.answer("❌ خطایی رخ داد", show_alert=True)
 
 # ============================================
-# 💬 پشتیبانی
-# ============================================
-@dp.message(Command('support'))
-async def support_start(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    lang = data.get('lang', 'en')
-    await message.answer(TEXTS[lang]["support"])
-    await state.set_state(RegStates.support)
-
-@dp.message(RegStates.support)
-async def process_support(message: types.Message, state: FSMContext):
-    await bot.send_message(
-        ADMIN_ID,
-        f"💬 سوال از کاربر {message.from_user.id}:\n\n{message.text}"
-    )
-    await message.answer("✅ پیام شما به پشتیبانی ارسال شد.")
-    await state.clear()
-
-# ============================================
-# 🚀 اجرای ربات
+# 🚀 تابع اصلی با مدیریت خطا و Restart خودکار
 # ============================================
 async def main():
-    print("🤖 ربات در حال اجراست...")
-    await dp.start_polling(bot)
+    """تابع اصلی با مدیریت خطا و تلاش مجدد"""
+    max_retries = 5
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"🚀 تلاش {attempt + 1} برای شروع ربات...")
+            
+            # ساخت دیتابیس
+            if not init_db():
+                logger.error("❌ ساخت دیتابیس ناموفق بود")
+                continue
+            
+            # ساخت ربات و dispatcher
+            bot = Bot(token=BOT_TOKEN)
+            storage = MemoryStorage()
+            dp = Dispatcher(storage=storage)
+            
+            # ثبت هندلرها
+            dp.message.register(cmd_start, CommandStart())
+            dp.callback_query.register(process_lang, F.data.startswith('lang_'))
+            dp.callback_query.register(process_country, F.data.startswith('country_'))
+            dp.message.register(process_email, RegStates.email)
+            dp.message.register(process_wallet, RegStates.wallet)
+            dp.callback_query.register(check_payment, F.data == 'check_payment')
+            dp.callback_query.register(process_team, F.data.startswith('team_'))
+            
+            logger.info("✅ ربات با موفقیت شروع شد!")
+            await dp.start_polling(bot)
+            
+        except Exception as e:
+            logger.error(f"❌ خطا در اجرای ربات (تلاش {attempt + 1}): {e}")
+            logger.error(traceback.format_exc())
+            
+            if attempt < max_retries - 1:
+                logger.info(f"⏳ تلاش مجدد در {retry_delay} ثانیه...")
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error("❌ تمام تلاش‌ها ناموفق بود. ربات متوقف می‌شود.")
+                break
 
 if __name__ == '__main__':
-    import hashlib
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 ربات توسط کاربر متوقف شد")
+    except Exception as e:
+        logger.error(f"❌ خطای غیرمنتظره: {e}")
+        logger.error(traceback.format_exc())
